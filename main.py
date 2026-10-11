@@ -52,8 +52,7 @@ async def handler(event):
         print(f"NEW MESSAGE: -> {text[:50]}")
 
         # ===== PRIVATE CALC MODE - .Calc =====
-        # Check if it's a calc command
-        is_calc_cmd = text.lower().startswith('.calc') or text.lower().startswith('. calc')
+        is_calc_cmd = text.lower().startswith('.calc')
         
         if is_calc_cmd and MATH_READY and BRAIN:
             try:
@@ -64,14 +63,15 @@ async def handler(event):
                     print(f"Calc detected: {text} = {result} | Waiting {delay:.1f}s like human...")
                     await asyncio.sleep(delay)
                     
-                    # Private reply with your emojis 📌 🫴
-                    reply_text = f"📌 .Calc: `{text}`\n🫴 Result: **{result}**"
+                    # Clean answer - 10 not 10.0 with your emojis 📌 🫴
+                    reply_text = f"📌 {text}\n🫴 {result}"
+                    # If you want ONLY answer, use: reply_text = f"{result}"
                     await event.reply(reply_text)
                     print(f"Replied privately, NOT pushing to Firebase 🔒")
-                    return # STOP HERE - Don't push to Firebase!
+                    return
                 else:
                     await asyncio.sleep(1)
-                    await event.reply(f"📌 .Calc: `{text}`\n🫴 Oops can't parse that bro 😅")
+                    await event.reply(f"📌 {text}\n🫴 Oops can't parse that bro 😅")
                     return
             except Exception as e:
                 print(f"Calc error: {e}")
