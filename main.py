@@ -1,6 +1,6 @@
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-import os, requests, asyncio, threading
+import os, requests, asyncio, threading, random
 from datetime import datetime
 from flask import Flask
 
@@ -42,27 +42,46 @@ def push(payload):
     except Exception as e:
         print(f"Fail: {e}")
 
-@client.on(events.NewMessage())
+@client.on(events.NewMessage(outgoing=True, incoming=True))
 async def handler(event):
     try:
         if not event.text: 
             return
+        
+        text = event.text.strip()
+        print(f"NEW MESSAGE: -> {text[:50]}")
+
+        # ===== PRIVATE CALC MODE - .Calc =====
+        # Check if it's a calc command
+        is_calc_cmd = text.lower().startswith('.calc') or text.lower().startswith('. calc')
+        
+        if is_calc_cmd and MATH_READY and BRAIN:
+            try:
+                result = BRAIN.parse_and_calc(text)
+                if result is not None:
+                    # Human-like delay 1 to 2 seconds 😅
+                    delay = random.uniform(1.0, 2.0)
+                    print(f"Calc detected: {text} = {result} | Waiting {delay:.1f}s like human...")
+                    await asyncio.sleep(delay)
+                    
+                    # Private reply with your emojis 📌 🫴
+                    reply_text = f"📌 .Calc: `{text}`\n🫴 Result: **{result}**"
+                    await event.reply(reply_text)
+                    print(f"Replied privately, NOT pushing to Firebase 🔒")
+                    return # STOP HERE - Don't push to Firebase!
+                else:
+                    await asyncio.sleep(1)
+                    await event.reply(f"📌 .Calc: `{text}`\n🫴 Oops can't parse that bro 😅")
+                    return
+            except Exception as e:
+                print(f"Calc error: {e}")
+                return
+
+        # ===== NORMAL DUMP MODE - Still goes to Firebase =====
         sender = await event.get_sender()
         chat = await event.get_chat()
         sender_name = getattr(sender, 'first_name', 'Unknown') or "Unknown"
         chat_name = getattr(chat, 'title', sender_name) or sender_name
-        
-        text = event.text
-        print(f"NEW MESSAGE: {chat_name} -> {text[:50]}")
-
-        calc_result = None
-        if MATH_READY and BRAIN:
-            try:
-                calc_result = BRAIN.parse_and_calc(text)
-                if calc_result is not None and text.lower().startswith(('/calc','calc')):
-                    await event.reply(f"🧠 {text} = {calc_result}")
-            except:
-                calc_result = None
         
         now = datetime.now()
         payload = {
@@ -73,9 +92,10 @@ async def handler(event):
             "text": text,
             "date": now.strftime("%Y-%m-%d"),
             "time": now.strftime("%H:%M:%S"),
-            "math_result": calc_result if calc_result is not None else 0
+            "math_result": 0
         }
         push(payload)
+        
     except Exception as e:
         print(f"Handler error: {e}")
         import traceback
