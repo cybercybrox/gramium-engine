@@ -4,8 +4,15 @@ import os, requests, asyncio, threading
 from datetime import datetime
 from flask import Flask
 
-# === IMPORT YOUR BRAIN ===
-from fred_math_core import BRAIN
+# Safe import - won't crash if math file missing
+try:
+    from fred_math_core import BRAIN
+    MATH_READY = True
+    print("Math Brain LOADED 🔥")
+except Exception as e:
+    print(f"Math Brain not loaded: {e}")
+    BRAIN = None
+    MATH_READY = False
 
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
@@ -13,13 +20,12 @@ SESSION = os.getenv("SESSION_STRING")
 FIREBASE_URL = os.getenv("FIREBASE_URL")
 
 print(f"DEBUG FIREBASE_URL loaded: {bool(FIREBASE_URL)}")
-print(f"DEBUG Math Brain Loaded: {BRAIN is not None} 🔥")
 
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Gramium Engine LIVE 🔥 | Math Brain ACTIVE"
+    return f"Gramium Engine LIVE 🔥 | Math: {MATH_READY}"
 
 def run_web():
     app.run(host='0.0.0.0', port=10000)
@@ -39,33 +45,25 @@ def push(payload):
 @client.on(events.NewMessage())
 async def handler(event):
     try:
-        if not event.text:
+        if not event.text: 
             return
         sender = await event.get_sender()
         chat = await event.get_chat()
         sender_name = getattr(sender, 'first_name', 'Unknown') or "Unknown"
         chat_name = getattr(chat, 'title', sender_name) or sender_name
+        
+        text = event.text
+        print(f"NEW MESSAGE: {chat_name} -> {text[:50]}")
 
-        text = event.text.strip()
-        print(f"NEW MESSAGE DETECTED: {chat_name} -> {text[:50]}")
-
-        # === GRAMIUM MATH BRAIN LOGIC ===
         calc_result = None
-        is_calc_command = False
-
-        # Check if user wants calc: /calc 5 + 5 OR 5 + 5 OR calc 5*5
-        if text.lower().startswith(('/calc', 'calc')):
-            is_calc_command = True
-            calc_result = BRAIN.parse_and_calc(text)
-            if calc_result is not None:
-                await event.reply(f"🧠 Gramiun Math Brain:\n`{text}` = **{calc_result}**")
-        else:
-            # Auto-detect simple math like "5 + 5" in any chat
-            maybe_math = BRAIN.parse_and_calc(text)
-            if maybe_math is not None and len(text) < 20: # prevent false positives
-                calc_result = maybe_math
-                print(f"Math detected: {text} = {calc_result}")
-
+        if MATH_READY and BRAIN:
+            try:
+                calc_result = BRAIN.parse_and_calc(text)
+                if calc_result is not None and text.lower().startswith(('/calc','calc')):
+                    await event.reply(f"🧠 {text} = {calc_result}")
+            except:
+                calc_result = None
+        
         now = datetime.now()
         payload = {
             "message_id": event.id,
@@ -75,12 +73,9 @@ async def handler(event):
             "text": text,
             "date": now.strftime("%Y-%m-%d"),
             "time": now.strftime("%H:%M:%S"),
-            "math_result": calc_result if calc_result is not None else 0,
-            "is_calc": is_calc_command
+            "math_result": calc_result if calc_result is not None else 0
         }
         push(payload)
-        print(f"NEW: {chat_name}: {text[:50]} | Calc: {calc_result}")
-
     except Exception as e:
         print(f"Handler error: {e}")
         import traceback
@@ -88,7 +83,7 @@ async def handler(event):
 
 async def main():
     await client.start()
-    print("Engine LIVE 🔥 | Math Brain READY")
+    print("Engine LIVE 🔥")
     print(f"Connected as: {(await client.get_me()).first_name}")
     await client.run_until_disconnected()
 
