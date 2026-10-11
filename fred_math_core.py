@@ -1,6 +1,6 @@
 # === GRAMIUM MATH BRAIN - PURE CALCULATOR ===
-# Version: 1.0 GOD - 0 heavy libs, 0 RAM waste, 100% speed
-# Author: Gramiun Engine 🔥
+# Version: 1.1 FIXED - 0 heavy libs, 0 RAM waste, 100% speed
+# Author: Gramiun Engine 🔥 - FIXED for /calc command
 
 from typing import List, Union
 
@@ -52,24 +52,41 @@ class MathBrain:
             return 0.0
         return self.batch(numbers, '+') / len(numbers)
 
-    # Advanced: Parse "5 + 5" or "10 * 2.5" from telegram text
+    # FIXED: Parse "/calc 5 + 5" correctly
     def parse_and_calc(self, text: str) -> Union[float, None]:
         try:
-            text = text.strip().lower().replace('x', '*')
+            t = text.strip().lower()
+
+            # 1. Remove command prefix cleanly
+            if t.startswith('/calc'):
+                t = t[5:].strip() # remove /calc
+            elif t.startswith('calc'):
+                t = t[4:].strip() # remove calc
+
+            # Remove any leftover leading / or :
+            t = t.lstrip('/').lstrip(':').strip()
+            t = t.replace('x', '*')
+
+            # t is now "5 + 5"
+            if not t:
+                return None
+
             for op in ['**', '+', '-', '*', '/', '%', '^']:
-                if f" {op} " in f" {text} " or op in text:
-                    # Handle calc like "5+5", "5 + 5", "calc 5 * 5"
-                    clean = text.replace('calc', '').strip()
-                    parts = None
-                    if op in clean:
-                        # split by op safely
-                        idx = clean.find(op)
-                        left = clean[:idx].strip()
-                        right = clean[idx+len(op):].strip()
-                        if left.replace('.','',1).lstrip('-').isdigit() and right.replace('.','',1).lstrip('-').isdigit():
-                            return self.calc(float(left), op, float(right))
+                if op in t:
+                    parts = t.split(op)
+                    if len(parts) == 2:
+                        left = parts[0].strip()
+                        right = parts[1].strip()
+                        # Check if both are numbers
+                        try:
+                            a = float(left)
+                            b = float(right)
+                            return self.calc(a, op, b)
+                        except:
+                            continue
             return None
-        except:
+        except Exception as e:
+            print(f"Parse error: {e}")
             return None
 
 # Singleton - One brain for whole engine
