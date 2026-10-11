@@ -2,4 +2,3 @@
 telethon
 requests
 flask
-pytz
