@@ -1,13 +1,13 @@
 # === GRAMIUM MATH BRAIN - PURE CALCULATOR ===
-# Version: 1.1 FIXED - 0 heavy libs, 0 RAM waste, 100% speed
-# Author: Gramiun Engine 🔥 - FIXED for /calc command
+# Version: 1.2 FINAL - Supports.Calc + clean integer output
+# Author: Gramiun Engine 🔥
 
 from typing import List, Union
 
 Number = Union[int, float]
 
 class MathBrain:
-    __slots__ = () # Super fast, no __dict__
+    __slots__ = ()
 
     def add(self, a: Number, b: Number) -> float:
         return float(a + b)
@@ -52,22 +52,29 @@ class MathBrain:
             return 0.0
         return self.batch(numbers, '+') / len(numbers)
 
-    # FIXED: Parse "/calc 5 + 5" correctly
-    def parse_and_calc(self, text: str) -> Union[float, None]:
+    def pretty(self, value: float) -> Union[int, float]:
+        # 10.0 -> 10, 10.5 -> 10.5
+        if value is None:
+            return 0
+        if float(value).is_integer():
+            return int(value)
+        return float(value)
+
+    def parse_and_calc(self, text: str) -> Union[int, float, None]:
         try:
             t = text.strip().lower()
 
-            # 1. Remove command prefix cleanly
-            if t.startswith('/calc'):
-                t = t[5:].strip() # remove /calc
+            # Remove.calc /calc calc
+            if t.startswith('.calc'):
+                t = t[5:].strip()
+            elif t.startswith('/calc'):
+                t = t[5:].strip()
             elif t.startswith('calc'):
-                t = t[4:].strip() # remove calc
+                t = t[4:].strip()
 
-            # Remove any leftover leading / or :
-            t = t.lstrip('/').lstrip(':').strip()
+            t = t.lstrip('.').lstrip('/').lstrip(':').strip()
             t = t.replace('x', '*')
 
-            # t is now "5 + 5"
             if not t:
                 return None
 
@@ -77,17 +84,15 @@ class MathBrain:
                     if len(parts) == 2:
                         left = parts[0].strip()
                         right = parts[1].strip()
-                        # Check if both are numbers
                         try:
                             a = float(left)
                             b = float(right)
-                            return self.calc(a, op, b)
+                            res = self.calc(a, op, b)
+                            return self.pretty(res)
                         except:
                             continue
             return None
-        except Exception as e:
-            print(f"Parse error: {e}")
+        except:
             return None
 
-# Singleton - One brain for whole engine
 BRAIN = MathBrain()
