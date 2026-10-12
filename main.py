@@ -218,6 +218,48 @@ def push(payload):
         print(f"❌ Firebase fail: {e}")
 
 
+# --- AUTOMATED BACKGROUND SCHEDULER (22:30 Harare Time) ---
+async def scheduled_macro_notifier(telegram_client, macro_engine):
+    last_sent_date = None
+    print("⏰ Background macro scheduler started (Target: 22:30 Harare Time)")
+    
+    while True:
+        try:
+            now_zw = datetime.now(zoneinfo.ZoneInfo("Africa/Harare"))
+            current_date = now_zw.date()
+            
+            # Triggers exactly at 22:30 once per day
+            if now_zw.hour == 22 and now_zw.minute == 30 and last_sent_date != current_date:
+                print("⚡ Scheduled time reached! Running Gramium Engine for nightly alert...")
+                result = await macro_engine.execute_all()
+                
+                ny_time_str = result['clock']['ny'].strftime('%H:%M:%S')
+                is_open_status = "OPEN 🟢" if result['clock']['is_ny_open'] else "CLOSED 🔴"
+                reasons_bullet = "\n".join([f"• {r}" for r in result['reasons']]) if result['reasons'] else "• No strong factors triggered."
+                
+                alert_message = (
+                    f"🔔 **TOMORROW MACRO BIAS ALERT** 🔔\n\n"
+                    f"**Bias:** {result['bias']}\n"
+                    f"**Score:** {result['score']}\n\n"
+                    f"💰 **Gold (XAU):** ${result['xau']:,.2f}\n"
+                    f"📉 **GLD Proxy:** ${result['gld']:,.2f}\n\n"
+                    f"🔍 **Core Drivers:**\n{reasons_bullet}\n\n"
+                    f"⏰ **Harare Time:** {now_zw.strftime('%H:%M:%S')} ({current_date})\n"
+                    f"🏛️ **COMEX Session:** {is_open_status}"
+                )
+                
+                # Send DM to yourself (Saved Messages)
+                await telegram_client.send_message('me', alert_message)
+                last_sent_date = current_date
+                print("🚀 Successfully sent automated nightly bias alert to Saved Messages!")
+                
+        except Exception as e:
+            print(f"❌ Scheduler error: {e}")
+            
+        # Check time every 30 seconds
+        await asyncio.sleep(30)
+
+
 # --- TELEGRAM EVENT HANDLER ---
 @client.on(events.NewMessage(incoming=True))
 @client.on(events.NewMessage(outgoing=True))
@@ -303,6 +345,9 @@ async def main():
     print(f"🔥 Engine LIVE as {me.first_name} - @{me.username}")
     print(f"🔥 Listening for triggers (`XAUUSD`) & syncing regular items...")
     
+    # Launch background scheduler task concurrently
+    asyncio.create_task(scheduled_macro_notifier(client, engine))
+    
     count = 0
     async for d in client.iter_dialogs(limit=10):
         print(f"  Joined: {d.name} - {d.id} | Group:{d.is_group} Channel:{d.is_channel}")
@@ -315,3 +360,4 @@ async def main():
 if __name__ == "__main__":
     threading.Thread(target=run_web, daemon=True).start()
     loop.run_until_complete(main())
+ 
