@@ -14,6 +14,13 @@ from telethon.sessions import StringSession
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+# --- PYTHON 3.14 EVENT LOOP COMPATIBILITY FIX ---
+try:
+    loop = asyncio.get_running_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
 # --- GRAMIUM ENGINE ---
 class GramiumEngine:
     def __init__(self, fred_api_key: str):
@@ -30,7 +37,6 @@ class GramiumEngine:
         }
 
     async def _fetch_fred_series(self, client: httpx.AsyncClient, series_id: str) -> dict:
-        """Fetches series history to calculate recent changes."""
         params = {
             "series_id": series_id,
             "api_key": self.fred_api_key,
@@ -43,7 +49,6 @@ class GramiumEngine:
             response.raise_for_status()
             data = response.json()
             observations = data.get("observations", [])
-            
             valid_obs = [o for o in observations if o.get("value") not in (".", None, "Unavailable")]
             
             if valid_obs:
@@ -70,7 +75,6 @@ class GramiumEngine:
         }
 
     async def _fetch_gld_price(self, client: httpx.AsyncClient) -> float:
-        """Fetches paper gold flow via Yahoo Finance GLD proxy."""
         url = "https://query1.finance.yahoo.com/v8/finance/chart/GLD"
         try:
             response = await client.get(url, headers=self.headers, timeout=5.0)
@@ -81,7 +85,6 @@ class GramiumEngine:
             return 0.0
 
     async def _fetch_xau_price(self, client: httpx.AsyncClient) -> float:
-        """Fetches real physical COMEX gold price."""
         url = "https://api.gold-api.com/price/XAU"
         try:
             response = await client.get(url, headers=self.headers, timeout=5.0)
@@ -92,7 +95,6 @@ class GramiumEngine:
             return 0.0
 
     def get_world_times(self) -> dict:
-        """Computes world clocks and COMEX session statuses."""
         now_utc = datetime.now(zoneinfo.ZoneInfo("UTC"))
         ny = now_utc.astimezone(zoneinfo.ZoneInfo("America/New_York"))
         pk = now_utc.astimezone(zoneinfo.ZoneInfo("Asia/Karachi"))
@@ -100,7 +102,7 @@ class GramiumEngine:
         london = now_utc.astimezone(zoneinfo.ZoneInfo("Europe/London"))
         
         ny_hour = ny.hour + ny.minute / 60
-        is_ny_open = 8.33 <= ny_hour <= 13.5  # 8:20 AM to 1:30 PM NY Time
+        is_ny_open = 8.33 <= ny_hour <= 13.5
         
         return {
             "utc_date": now_utc.date(),
@@ -113,7 +115,6 @@ class GramiumEngine:
         }
 
     def calculate_bias(self, fred_dict: dict, gld_price: float, xau_price: float) -> tuple:
-        """Evaluates macro indicators and market premiums to generate trading bias."""
         score = 0
         reasons = []
 
@@ -180,6 +181,7 @@ class GramiumEngine:
 
 # --- FLASK KEEP-ALIVE SERVER ---
 app = Flask(__name__)
+
 @app.route('/')
 def home():
     return "Gramium Engine LIVE 🔥 - Running & Monitoring"
@@ -190,15 +192,19 @@ def run_web():
 
 
 # --- CONFIGURATION & INIT ---
-API_ID = int(os.getenv("API_ID", "0"))
+API_ID_RAW = os.getenv("API_ID", "0")
+API_ID = int(API_ID_RAW) if API_ID_RAW.isdigit() else 0
 API_HASH = os.getenv("API_HASH", "")
 SESSION = os.getenv("SESSION_STRING", "")
 FIREBASE_URL = os.getenv("FIREBASE_URL", "")
 FRED_API_KEY = os.getenv("FRED_API_KEY", "950d24880df05b9e609f2927d3a1076b")
 
-print(f"ENV: API_ID={bool(API_ID)} HASH={bool(API_HASH)} SESSION={bool(SESSION)} FB={bool(FIREBASE_URL)}")
+print(f"ENV CHECK: API_ID={bool(API_ID)} HASH={bool(API_HASH)} SESSION={bool(SESSION)} FB={bool(FIREBASE_URL)}")
 
-client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
+if not API_ID or not API_HASH or not SESSION:
+    print("❌ CRITICAL ERROR: Missing API_ID, API_HASH, or SESSION_STRING environment variables!")
+
+client = TelegramClient(StringSession(SESSION), API_ID, API_HASH, loop=loop)
 engine = GramiumEngine(FRED_API_KEY)
 
 
@@ -217,7 +223,6 @@ def push(payload):
 @client.on(events.NewMessage(outgoing=True))
 async def handler(event):
     try:
-        # Get text safely
         text = ""
         if event.text:
             text = event.text
@@ -228,11 +233,8 @@ async def handler(event):
         else:
             text = "[Media/No Text]"
 
-        # Check if message triggers the XAUUSD automated analysis command
         if "xauusd" in text.lower():
             print(f"⚡ XAUUSD trigger detected! Running Gramium Engine...")
-            
-            # Fetch latest analytics concurrently
             result = await engine.execute_all()
             
             ny_time_str = result['clock']['ny'].strftime('%H:%M:%S')
@@ -252,15 +254,10 @@ async def handler(event):
                 f"🏛️ **COMEX Session:** {is_open_status}"
             )
             
-            # Reply directly to the trigger message
             await event.reply(response_message)
             print("🚀 Successfully sent automated XAUUSD analysis reply.")
-            
-            # Skip pushing bot's own evaluation commands/triggers to Firebase if desired, 
-            # or return right away so bot output isn't logged back into your database queue.
             return
 
-        # Regular Message Handling for Firebase Syncing
         try:
             chat = await event.get_chat()
             chat_title = getattr(chat, 'title', None) or getattr(chat, 'first_name', None) or str(event.chat_id)
@@ -287,7 +284,6 @@ async def handler(event):
             "timestamp": int(datetime.now().timestamp())
         }
         
-        # Push standard messages to Firebase in background thread
         if FIREBASE_URL:
             threading.Thread(target=push, args=(payload,), daemon=True).start()
 
@@ -298,6 +294,10 @@ async def handler(event):
 
 
 async def main():
+    if not API_ID or not API_HASH or not SESSION:
+        print("❌ Telegram client cannot start due to missing environment variables on Render.")
+        return
+
     await client.start()
     me = await client.get_me()
     print(f"🔥 Engine LIVE as {me.first_name} - @{me.username}")
@@ -314,4 +314,4 @@ async def main():
 
 if __name__ == "__main__":
     threading.Thread(target=run_web, daemon=True).start()
-    asyncio.run(main())
+    loop.run_until_complete(main())
