@@ -2,28 +2,205 @@ import os
 import requests
 import threading
 import asyncio
+import logging
 from datetime import datetime
+import zoneinfo
+import httpx
 from flask import Flask
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 
+# Configure production logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+# --- GRAMIUM ENGINE ---
+class GramiumEngine:
+    def __init__(self, fred_api_key: str):
+        self.fred_api_key = fred_api_key
+        self.fred_url = "https://api.stlouisfed.org/fred/series/observations"
+        self.headers = {"User-Agent": "Mozilla/5.0"}
+        
+        self.metrics = {
+            "DTWEXBGS": "Real USD Strength",
+            "SOFR": "SOFR",
+            "WALCL": "Total Assets",
+            "RRPONTSYD": "Reverse Repo",
+            "DGS10": "10-Year Treasury Yield"
+        }
+
+    async def _fetch_fred_series(self, client: httpx.AsyncClient, series_id: str) -> dict:
+        """Fetches series history to calculate recent changes."""
+        params = {
+            "series_id": series_id,
+            "api_key": self.fred_api_key,
+            "file_type": "json",
+            "sort_order": "desc",
+            "limit": 45
+        }
+        try:
+            response = await client.get(self.fred_url, params=params, timeout=5.0)
+            response.raise_for_status()
+            data = response.json()
+            observations = data.get("observations", [])
+            
+            valid_obs = [o for o in observations if o.get("value") not in (".", None, "Unavailable")]
+            
+            if valid_obs:
+                latest_val = float(valid_obs[0]["value"])
+                historical_val = float(valid_obs[min(30, len(valid_obs) - 1)]["value"])
+                change_pct = ((latest_val - historical_val) / historical_val) * 100 if historical_val != 0 else 0.0
+                
+                return {
+                    "id": series_id,
+                    "name": self.metrics.get(series_id, series_id),
+                    "latest_value": latest_val,
+                    "change_pct_30d": change_pct,
+                    "date": valid_obs[0]["date"]
+                }
+        except Exception as e:
+            logger.error(f"Error fetching FRED series {series_id}: {e}")
+            
+        return {
+            "id": series_id,
+            "name": self.metrics.get(series_id, series_id),
+            "latest_value": 0.0,
+            "change_pct_30d": 0.0,
+            "date": "N/A"
+        }
+
+    async def _fetch_gld_price(self, client: httpx.AsyncClient) -> float:
+        """Fetches paper gold flow via Yahoo Finance GLD proxy."""
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/GLD"
+        try:
+            response = await client.get(url, headers=self.headers, timeout=5.0)
+            data = response.json()
+            return float(data['chart']['result'][0]['meta']['regularMarketPrice'])
+        except Exception as e:
+            logger.error(f"Error fetching GLD price: {e}")
+            return 0.0
+
+    async def _fetch_xau_price(self, client: httpx.AsyncClient) -> float:
+        """Fetches real physical COMEX gold price."""
+        url = "https://api.gold-api.com/price/XAU"
+        try:
+            response = await client.get(url, headers=self.headers, timeout=5.0)
+            data = response.json()
+            return float(data.get('price', 0.0))
+        except Exception as e:
+            logger.error(f"Error fetching XAU price: {e}")
+            return 0.0
+
+    def get_world_times(self) -> dict:
+        """Computes world clocks and COMEX session statuses."""
+        now_utc = datetime.now(zoneinfo.ZoneInfo("UTC"))
+        ny = now_utc.astimezone(zoneinfo.ZoneInfo("America/New_York"))
+        pk = now_utc.astimezone(zoneinfo.ZoneInfo("Asia/Karachi"))
+        zw = now_utc.astimezone(zoneinfo.ZoneInfo("Africa/Harare"))
+        london = now_utc.astimezone(zoneinfo.ZoneInfo("Europe/London"))
+        
+        ny_hour = ny.hour + ny.minute / 60
+        is_ny_open = 8.33 <= ny_hour <= 13.5  # 8:20 AM to 1:30 PM NY Time
+        
+        return {
+            "utc_date": now_utc.date(),
+            "ny": ny,
+            "pk": pk,
+            "zw": zw,
+            "london": london,
+            "is_ny_open": is_ny_open,
+            "fred_fetch_window": (zw.hour == 22 and zw.minute >= 25)
+        }
+
+    def calculate_bias(self, fred_dict: dict, gld_price: float, xau_price: float) -> tuple:
+        """Evaluates macro indicators and market premiums to generate trading bias."""
+        score = 0
+        reasons = []
+
+        dtwex_change = fred_dict.get("DTWEXBGS", {}).get("change_pct_30d", 0.0)
+        if dtwex_change > 1.0:
+            score += 2
+            reasons.append(f"USD strong (+{dtwex_change:.2f}%) = SELL")
+        elif dtwex_change < -1.0:
+            score -= 2
+            reasons.append(f"USD weak ({dtwex_change:.2f}%) = BUY")
+
+        dgs10_change = fred_dict.get("DGS10", {}).get("change_pct_30d", 0.0)
+        if dgs10_change > 0:
+            score += 1
+            reasons.append("Yield up = SELL")
+
+        rrp_change = fred_dict.get("RRPONTSYD", {}).get("change_pct_30d", 0.0)
+        if rrp_change < -50:
+            score += 1
+            reasons.append(f"Cash pile drained ({rrp_change:.1f}%) = Risk On / Sell Gold")
+
+        if gld_price > 0 and xau_price > 0:
+            premium = xau_price - (gld_price * 10)
+            premium_pct = (premium / xau_price) * 100
+            if premium_pct > 5:
+                score -= 1
+                reasons.append(f"High physical premium ({premium_pct:.1f}%) = BUY")
+            elif premium_pct < 2:
+                score += 1
+                reasons.append("Low physical premium = SELL")
+
+        if score >= 2:
+            bias = "🔴 SELL ONLY TODAY - Wait for setup then SELL"
+        elif score <= -2:
+            bias = "🟢 BUY ONLY TODAY"
+        else:
+            bias = "🟡 NEUTRAL - Stand aside"
+
+        return bias, score, reasons
+
+    async def execute_all(self) -> dict:
+        async with httpx.AsyncClient() as client:
+            fred_tasks = [self._fetch_fred_series(client, series_id) for series_id in self.metrics.keys()]
+            fred_results, gld_price, xau_price = await asyncio.gather(
+                asyncio.gather(*fred_tasks),
+                self._fetch_gld_price(client),
+                self._fetch_xau_price(client)
+            )
+
+        fred_dict = {item["id"]: item for item in fred_results}
+        clock_data = self.get_world_times()
+        bias, score, reasons = self.calculate_bias(fred_dict, gld_price, xau_price)
+
+        return {
+            "clock": clock_data,
+            "fred": fred_dict,
+            "gld": gld_price,
+            "xau": xau_price,
+            "bias": bias,
+            "score": score,
+            "reasons": reasons
+        }
+
+
+# --- FLASK KEEP-ALIVE SERVER ---
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return "Gramium Engine LIVE 🔥 - Listening to ALL"
+    return "Gramium Engine LIVE 🔥 - Running & Monitoring"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
+
+# --- CONFIGURATION & INIT ---
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 SESSION = os.getenv("SESSION_STRING", "")
 FIREBASE_URL = os.getenv("FIREBASE_URL", "")
+FRED_API_KEY = os.getenv("FRED_API_KEY", "950d24880df05b9e609f2927d3a1076b")
 
-print(f"ENV: API_ID={bool(API_ID)} HASH={bool(API_HASH)} SESSION={bool(SESSION)} FB={FIREBASE_URL[:30]}")
+print(f"ENV: API_ID={bool(API_ID)} HASH={bool(API_HASH)} SESSION={bool(SESSION)} FB={bool(FIREBASE_URL)}")
 
 client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
+engine = GramiumEngine(FRED_API_KEY)
+
 
 def push(payload):
     try:
@@ -34,27 +211,13 @@ def push(payload):
     except Exception as e:
         print(f"❌ Firebase fail: {e}")
 
-# FIXED: This will catch EVERYTHING
+
+# --- TELEGRAM EVENT HANDLER ---
 @client.on(events.NewMessage(incoming=True))
 @client.on(events.NewMessage(outgoing=True))
 async def handler(event):
-    print(f"--- RAW EVENT RECEIVED --- chat_id={event.chat_id} is_group={event.is_group} is_channel={event.is_channel}")
     try:
-        # Get chat safely
-        try:
-            chat = await event.get_chat()
-            chat_title = getattr(chat, 'title', None) or getattr(chat, 'first_name', None) or str(event.chat_id)
-        except:
-            chat_title = str(event.chat_id)
-
-        # Get sender safely - channels will fail, use chat title
-        try:
-            sender = await event.get_sender()
-            sender_name = getattr(sender, 'first_name', None) or getattr(sender, 'title', None) or "Unknown"
-        except Exception:
-            sender_name = chat_title
-
-        # Get text - handles photo captions, docs, everything
+        # Get text safely
         text = ""
         if event.text:
             text = event.text
@@ -65,7 +228,50 @@ async def handler(event):
         else:
             text = "[Media/No Text]"
 
-        print(f"NEW MSG: [{chat_title}] {sender_name}: {text[:60]}")
+        # Check if message triggers the XAUUSD automated analysis command
+        if "xauusd" in text.lower():
+            print(f"⚡ XAUUSD trigger detected! Running Gramium Engine...")
+            
+            # Fetch latest analytics concurrently
+            result = await engine.execute_all()
+            
+            ny_time_str = result['clock']['ny'].strftime('%H:%M:%S')
+            ny_date_str = result['clock']['ny'].strftime('%Y-%m-%d')
+            is_open_status = "OPEN 🟢" if result['clock']['is_ny_open'] else "CLOSED 🔴"
+            
+            reasons_bullet = "\n".join([f"• {r}" for r in result['reasons']]) if result['reasons'] else "• No strong factors triggered."
+            
+            response_message = (
+                f"📊 **GRAMIUM ENGINE: XAUUSD ANALYSIS** 📊\n\n"
+                f"**Bias:** {result['bias']}\n"
+                f"**Score:** {result['score']}\n\n"
+                f"💰 **Gold (XAU):** ${result['xau']:,.2f}\n"
+                f"📉 **GLD Proxy:** ${result['gld']:,.2f}\n\n"
+                f"🔍 **Core Drivers:**\n{reasons_bullet}\n\n"
+                f"⏰ **NY Time:** {ny_time_str} ({ny_date_str})\n"
+                f"🏛️ **COMEX Session:** {is_open_status}"
+            )
+            
+            # Reply directly to the trigger message
+            await event.reply(response_message)
+            print("🚀 Successfully sent automated XAUUSD analysis reply.")
+            
+            # Skip pushing bot's own evaluation commands/triggers to Firebase if desired, 
+            # or return right away so bot output isn't logged back into your database queue.
+            return
+
+        # Regular Message Handling for Firebase Syncing
+        try:
+            chat = await event.get_chat()
+            chat_title = getattr(chat, 'title', None) or getattr(chat, 'first_name', None) or str(event.chat_id)
+        except:
+            chat_title = str(event.chat_id)
+
+        try:
+            sender = await event.get_sender()
+            sender_name = getattr(sender, 'first_name', None) or getattr(sender, 'title', None) or "Unknown"
+        except Exception:
+            sender_name = chat_title
 
         payload = {
             "message_id": event.id,
@@ -81,26 +287,30 @@ async def handler(event):
             "timestamp": int(datetime.now().timestamp())
         }
         
-        # Push in background
-        threading.Thread(target=push, args=(payload,), daemon=True).start()
+        # Push standard messages to Firebase in background thread
+        if FIREBASE_URL:
+            threading.Thread(target=push, args=(payload,), daemon=True).start()
 
     except Exception as e:
         print(f"❌ Handler crashed: {e}")
         import traceback
         traceback.print_exc()
 
+
 async def main():
     await client.start()
     me = await client.get_me()
     print(f"🔥 Engine LIVE as {me.first_name} - @{me.username}")
-    print(f"🔥 Now listening to ALL groups/channels...")
-    # List dialogs to prove it's connected to groups
+    print(f"🔥 Listening for triggers (`XAUUSD`) & syncing regular items...")
+    
     count = 0
     async for d in client.iter_dialogs(limit=10):
         print(f"  Joined: {d.name} - {d.id} | Group:{d.is_group} Channel:{d.is_channel}")
         count += 1
-    print(f"Total shown {count} dialogs")
+    print(f"Total checked {count} dialogs")
+    
     await client.run_until_disconnected()
+
 
 if __name__ == "__main__":
     threading.Thread(target=run_web, daemon=True).start()
