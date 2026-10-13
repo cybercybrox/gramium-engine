@@ -1,4 +1,4 @@
-
+deriv-api
 telethon
 Flask
 websockets
