@@ -16,7 +16,7 @@ except RuntimeError:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-# ================== BRAIN ==================
+# ================== BRAIN (SAME) ==================
 class EMA:
     def __init__(self, period):
         self.period = period
@@ -73,13 +73,13 @@ class TrendBrain:
         ema20_val = self.ema20.update(price); ema100_val = self.ema100.update(price)
         structure = self.trend_detector.update(price)
         if not self.ema100.is_ready() or not self.ema20.is_ready():
-            return {"bias":"ACCUMULATING","price":price,"ema20":ema20_val,"ema100":ema100_val,
-                    "structure":structure,"q1":"Accumulating...","q2":"Accumulating...","q3":"Accumulating...","q4":"Accumulating...",
-                    "sh":self.trend_detector.last_swing_high,"sl":self.trend_detector.last_swing_low}
-        if price > ema100_val: q1 = f"ABOVE EMA100 Bulls {price:.2f}>{ema100_val:.2f}"
-        elif price < ema100_val: q1 = f"BELOW EMA100 Bears {price:.2f}<{ema100_val:.2f}"
+            return {"bias":f"ACCUMULATING {self.ema100.count}/100","price":price,"ema20":ema20_val,"ema100":ema100_val,
+                    "structure":structure,"q1":"Need 100 candles","q2":"Need 100","q3":"Need 100","q4":"Need 100",
+                    "sh":self.trend_detector.last_swing_high,"sl":self.trend_detector.last_swing_low,"ready":False}
+        if price > ema100_val: q1 = f"ABOVE EMA100 Bulls"
+        elif price < ema100_val: q1 = f"BELOW EMA100 Bears"
         else: q1 = "EQUAL"
-        if ema20_val > ema100_val: q2 = "EMA20 ABOVE EMA100 UP"
+        if ema20_val > ema100_val: q2 = "EMA20 ABOVE UP"
         elif ema20_val < ema100_val: q2 = "EMA20 BELOW DOWN"
         else: q2 = "EQUAL"
         if not self.has_prev:
@@ -104,114 +104,117 @@ class TrendBrain:
         else: bias = "SIDEWAYS_CONSOLIDATION"
         return {"bias":bias,"price":price,"ema20":ema20_val,"ema100":ema100_val,
                 "structure":structure,"q1":q1,"q2":q2,"q3":q3,"q4":q4,
-                "sh":self.trend_detector.last_swing_high,"sl":self.trend_detector.last_swing_low}
+                "sh":self.trend_detector.last_swing_high,"sl":self.trend_detector.last_swing_low,"ready":True}
 
-# ================== DERIV OFFICIAL LIBRARY FETCH ==================
-async def fetch_deriv_v75_candles_with_errors():
-    """
-    Uses official deriv_api Python lib from Deriv dev portal
-    Docs: https://developers.deriv.com/
-    pip install deriv-api
-    """
-    errors_log = []
+# ================== 20 CANDLES TEST + ERROR TRACKER ==================
+async def fetch_20_candles_tracker():
+    tracker = []
+    tracker.append("🔍 STARTING 20 CANDLES TEST")
+    
+    # METHOD 1: Official deriv-api lib
     try:
         from deriv_api import DerivAPI
-        import websockets
+        tracker.append("✅ deriv-api lib FOUND")
         
-        # Try multiple app_ids - 1089 is demo, 111111 is public, 101480 is another
-        # Also try with origin header to bypass Cloudflare 520
-        app_ids = ["1089", "111111", "101480", "36956"]
-        
-        for app_id in app_ids:
+        for app_id in ["1089", "111111"]:
             try:
-                logger.info(f"TRYING DerivAPI with app_id={app_id}")
-                # DerivAPI handles connection itself
+                tracker.append(f"⏳ TRY app_id={app_id} with 20 candles...")
                 api = DerivAPI(app_id=app_id)
                 
-                # Get 1000 candles 1m = enough for EMA100 + 7 days partial
-                # Deriv docs: ticks_history
-                response = await api.ticks_history({
+                # This is exact format from Deriv docs
+                res = await api.ticks_history({
                     "ticks_history": "R_75",
                     "adjust_start_time": 1,
-                    "count": 1000,
+                    "count": 20,
                     "end": "latest",
                     "style": "candles",
                     "granularity": 60
                 })
                 
-                logger.info(f"Deriv response with app_id {app_id}: {str(response)[:600]}")
+                tracker.append(f"📥 RAW DERIV RESPONSE app_id {app_id}: {json.dumps(res)[:1000]}")
                 
-                if "error" in response:
-                    err = response["error"]
-                    errors_log.append(f"app_id {app_id} error: {err}")
-                    logger.error(f"Deriv error {app_id}: {err}")
+                if "error" in res:
+                    tracker.append(f"❌ DERIV ERROR app_id {app_id}: {res['error']}")
                     continue
                 
-                candles = response.get("candles", [])
-                if candles and len(candles) >= 100:
+                candles = res.get("candles", [])
+                tracker.append(f"✅ Got {len(candles)} candles from app_id {app_id}")
+                
+                if candles:
                     prices = [float(c["close"]) for c in candles]
-                    logger.info(f"SUCCESS {len(prices)} candles with app_id {app_id}")
-                    return prices, f"SUCCESS with app_id {app_id}"
-                else:
-                    errors_log.append(f"app_id {app_id} returned {len(candles)} candles, need >100")
-                    
-                    # Try ticks style as fallback
-                    response2 = await api.ticks_history({
-                        "ticks_history": "R_75",
-                        "count": 1000,
-                        "end": "latest",
-                        "style": "ticks"
-                    })
-                    logger.info(f"Ticks fallback response: {str(response2)[:600]}")
-                    if "history" in response2:
-                        hist = response2["history"]
-                        prices_raw = hist.get("prices", []) if isinstance(hist, dict) else []
-                        if len(prices_raw) >= 100:
-                            prices = [float(p) for p in prices_raw]
-                            return prices, f"SUCCESS TICKS with app_id {app_id}"
+                    tracker.append(f"💰 PRICES: {prices[:3]}... to {prices[-1]}")
+                    await api.disconnect()
+                    return prices, "\n".join(tracker)
                 
                 await api.disconnect()
                 
             except Exception as e:
-                err_str = f"app_id {app_id} exception: {type(e).__name__}: {e}"
-                errors_log.append(err_str)
-                logger.error(err_str)
+                tracker.append(f"💥 EXCEPTION app_id {app_id}: {type(e).__name__}: {str(e)[:500]}")
                 continue
-        
-        # If all app_ids failed, try raw websockets with proper Origin header (fixes 520)
-        logger.info("All DerivAPI app_ids failed, trying raw WS with Origin header...")
-        try:
-            import websockets
-            uri = "wss://ws.derivws.com/websockets/v3?app_id=1089"
-            async with websockets.connect(
-                uri, 
-                extra_headers={"Origin": "https://api.deriv.com", "User-Agent": "Mozilla/5.0"},
-                ping_interval=None
-            ) as ws:
-                req = {"ticks_history": "R_75", "count": 1000, "end": "latest", "style": "candles", "granularity": 60}
-                await ws.send(json.dumps(req))
-                raw = await asyncio.wait_for(ws.recv(), timeout=15)
-                data = json.loads(raw)
-                logger.info(f"Raw WS with Origin: {raw[:800]}")
-                if "candles" in data:
-                    candles = data["candles"]
-                    if len(candles) >= 100:
-                        return [float(c["close"]) for c in candles], "SUCCESS raw WS with Origin"
-                errors_log.append(f"Raw WS response: {raw[:500]}")
-        except Exception as e:
-            errors_log.append(f"Raw WS with Origin failed: {type(e).__name__}: {e}")
-        
-        return [], "\n".join(errors_log) if errors_log else "No errors logged - total fail"
-        
+                
     except ImportError as e:
-        return [], f"deriv-api lib not installed: {e} - add deriv-api to requirements.txt"
+        tracker.append(f"❌ deriv-api NOT INSTALLED: {e} -> add deriv-api to requirements.txt")
     except Exception as e:
-        return [], f"CRITICAL FETCH ERROR: {type(e).__name__}: {e}\n" + "\n".join(errors_log)
+        tracker.append(f"💥 DerivAPI CRITICAL: {type(e).__name__}: {e}")
+
+    # METHOD 2: Raw websockets with Origin header (fixes 520)
+    tracker.append("⏳ TRYING raw WS fallback with Origin header...")
+    try:
+        import websockets
+        uri = "wss://ws.derivws.com/websockets/v3?app_id=1089"
+        tracker.append(f"🔗 Connecting to {uri}")
+        
+        async with websockets.connect(
+            uri,
+            extra_headers={"Origin": "https://deriv.com", "User-Agent": "Mozilla/5.0"},
+            ping_interval=None,
+            close_timeout=10
+        ) as ws:
+            req = {"ticks_history": "R_75", "count": 20, "end": "latest", "style": "candles", "granularity": 60}
+            tracker.append(f"📤 SENDING: {json.dumps(req)}")
+            await ws.send(json.dumps(req))
+            
+            raw = await asyncio.wait_for(ws.recv(), timeout=15)
+            tracker.append(f"📥 RAW WS RESPONSE: {raw[:1500]}")
+            
+            data = json.loads(raw)
+            if "error" in data:
+                tracker.append(f"❌ DERIV WS ERROR: {data['error']}")
+            elif "candles" in data:
+                candles = data["candles"]
+                tracker.append(f"✅ WS Got {len(candles)} candles")
+                prices = [float(c["close"]) for c in candles]
+                return prices, "\n".join(tracker)
+            else:
+                tracker.append(f"❓ Unknown WS format: {list(data.keys())}")
+                
+    except Exception as e:
+        tracker.append(f"💥 Raw WS FAILED: {type(e).__name__}: {str(e)[:800]}")
+
+    # METHOD 3: Try binaryws endpoint
+    tracker.append("⏳ TRYING binaryws.com endpoint...")
+    try:
+        import websockets
+        uri = "wss://ws.binaryws.com/websockets/v3?app_id=1089"
+        async with websockets.connect(uri, ping_interval=None) as ws:
+            req = {"ticks_history": "R_75", "count": 20, "end": "latest", "style": "candles", "granularity": 60}
+            await ws.send(json.dumps(req))
+            raw = await asyncio.wait_for(ws.recv(), timeout=15)
+            tracker.append(f"📥 binaryws RAW: {raw[:1500]}")
+            data = json.loads(raw)
+            if "candles" in data and len(data["candles"]) >= 10:
+                prices = [float(c["close"]) for c in data["candles"]]
+                return prices, "\n".join(tracker)
+    except Exception as e:
+        tracker.append(f"💥 binaryws FAILED: {type(e).__name__}: {e}")
+
+    tracker.append("❌ ALL METHODS FAILED - 0 candles")
+    return [], "\n".join(tracker)
 
 # ================== FLASK ==================
 app = Flask(__name__)
 @app.route('/')
-def home(): return "V75 BRAIN - OFFICIAL DERIV API 🔥"
+def home(): return "V75 20 CANDLES TEST LIVE 🔥"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -230,69 +233,45 @@ async def handler(event):
     if not text: return
     low = text.lower()
     if low.startswith("/v75") or low == "v75":
-        await event.reply("⏳ Connecting to Deriv using OFFICIAL lib... trying 4 app_ids 🔍")
+        await event.reply("⏳ TESTING 20 CANDLES - tracking errors...")
         try:
-            prices, debug_info = await fetch_deriv_v75_candles_with_errors()
-            logger.info(f"FINAL prices: {len(prices)} debug: {debug_info}")
+            prices, tracker_log = await fetch_20_candles_tracker()
             
-            if len(prices) < 100:
-                # SEND DERIV ERRORS TO TELEGRAM AS YOU ASKED
-                error_msg = (
-                    f"❌ Deriv API Failed (got {len(prices)} candles)\n\n"
-                    f"🔍 **DERIV ERRORS:**\n{debug_info[:3000]}\n\n"
-                    f"💡 **FIX:**\n"
-                    f"1. Go to https://api.deriv.com\n"
-                    f"2. Login → Manage App → Register App\n"
-                    f"3. Get your own app_id (free)\n"
-                    f"4. Set ENV var DERIV_APP_ID on Render\n"
-                    f"5. Or try redeploy - Render IP sometimes blocked (520)\n\n"
-                    f"Current Render IP got HTTP 520 from Cloudflare"
-                )
-                await event.reply(error_msg)
+            # SEND TRACKER TO TELEGRAM
+            tracker_msg = f"🔍 **DERIV TRACKER LOG (20 candles test):**\n\n{tracker_log[:3500]}"
+            await event.reply(tracker_msg)
+            
+            if len(prices) < 10:
+                await event.reply(f"❌ FAILED - got {len(prices)} candles. See tracker above for Deriv's exact error.")
                 return
 
+            # If we got 20, show brain analysis (will be accumulating but shows it works)
             brain = TrendBrain()
             result = None
             for p in prices:
                 result = brain.update(p)
 
-            emoji_map = {
-                "ULTRA_BULLISH": "🟢🟢🟢 ULTRA_BULLISH 🚀🚀🚀",
-                "STRONG_BULLISH": "🟢🟢 STRONG_BULLISH 🚀",
-                "BULLISH": "🟢 BULLISH",
-                "ULTRA_BEARISH": "🔴🔴🔴 ULTRA_BEARISH 💀💀💀",
-                "STRONG_BEARISH": "🔴🔴 STRONG_BEARISH 💀",
-                "BEARISH": "🔴 BEARISH",
-                "SIDEWAYS_CONSOLIDATION": "🟡 SIDEWAYS 😴",
-                "ACCUMULATING": "⏳ ACCUMULATING..."
-            }
-            bias_emoji = emoji_map.get(result["bias"], result["bias"])
-            
             msg = (
-                f"📊 **V75 ULTRA BRAIN (OFFICIAL API)** 📊\n\n"
-                f"Symbol: R_75 (Volatility 75)\n"
-                f"Candles: {len(prices)} x 1m\n"
-                f"Price: {result['price']:.2f}\n\n"
-                f"🔥 BIAS: {bias_emoji}\n\n"
-                f"EMA20: {result['ema20']:.2f}\n"
-                f"EMA100: {result['ema100']:.2f}\n"
-                f"Structure: {result['structure']}\n"
-                f"High: {result['sh']:.2f} Low: {result['sl']:.2f}\n\n"
-                f"Q1: {result['q1']}\n"
-                f"Q2: {result['q2']}\n"
-                f"Q3: {result['q3']}\n"
-                f"Q4: {result['q4']}\n\n"
-                f"Debug: {debug_info}\n"
+                f"📊 **V75 TEST - 20 CANDLES SUCCESS!** 📊\n\n"
+                f"Got: {len(prices)} candles\n"
+                f"Last price: {result['price']:.2f}\n"
+                f"Prices: {', '.join([f'{p:.2f}' for p in prices[-5:]])}\n\n"
+                f"Bias: {result['bias']}\n"
+                f"EMA20: {result['ema20']:.2f} (needs 20)\n"
+                f"EMA100: {result['ema100']:.2f} (needs 100)\n"
+                f"Note: 20 candles not enough for ULTRA signal, need 100+. But connection WORKS! ✅\n\n"
+                f"Now change count to 1000 for full analysis."
             )
             await event.reply(msg)
+            
         except Exception as e:
             logger.exception(e)
-            await event.reply(f"❌ Critical Error: {type(e).__name__}: {e}")
+            await event.reply(f"💥 CRITICAL ERROR: {type(e).__name__}: {e}\n\nTracker:\n{tracker_log[:2000] if 'tracker_log' in locals() else 'no tracker'}")
 
 async def main():
     await tg_client.start()
     me = await tg_client.get_me()
-    print(f"🔥 V75 BOT LIVE as {me.first_name} - @{me.username}")
+    print(f"🔥 V75 20 CANDLES TEST BOT LIVE as {me.first_name}")
     await tg_client.run_until_disconnected()
 
 if __name__ == "__main__":
