@@ -2,6 +2,7 @@
   "name": "gramium-whatsapp",
   "version": "1.0.0",
   "description": "Gramium WhatsApp connection service",
+  "license": "MIT",
   "main": "whatsapp.js",
   "scripts": {
     "start": "node whatsapp.js"
