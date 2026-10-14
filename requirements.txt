@@ -1,5 +1,5 @@
 python-deriv-api
 telethon
 Flask
-websockets
+websockets==13.0
 httpx
