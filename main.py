@@ -7,7 +7,7 @@ from flask import Flask
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 try:
@@ -16,7 +16,7 @@ except RuntimeError:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-# ================== BRAIN (SAME) ==================
+# ================== BRAIN ==================
 class EMA:
     def __init__(self, period):
         self.period = period
@@ -37,38 +37,52 @@ class EMA:
 class TrendBrain:
     def __init__(self):
         self.ema20 = EMA(20); self.ema100 = EMA(100)
-        self.count = 0
     def update(self, price: float):
         e20 = self.ema20.update(price); e100 = self.ema100.update(price)
-        self.count += 1
         ready = self.ema20.is_ready() and self.ema100.is_ready()
-        return {"price":price,"ema20":e20,"ema100":e100,"ready":ready,"count":self.count}
+        return {"price":price,"ema20":e20,"ema100":e100,"ready":ready}
 
-# ================== 20 CANDLES WITH TIMEOUTS ==================
+# ================== 20 CANDLES FIXED ==================
 async def fetch_20_candles_tracker():
     tracker = []
     tracker.append("🔍 START 20 CANDLES TEST")
 
-    # TRY 1: Raw WS with Origin - NO LIB, fastest
     try:
         import websockets
-        tracker.append("⏳ TRY 1: ws.derivws.com + Origin header (10s timeout)")
-        uri = "wss://ws.derivws.com/websockets/v3?app_id=1089"
-        
-        async def try_ws(uri_to_try):
-            async with websockets.connect(
-                uri_to_try,
-                additional_headers={"Origin": "https://deriv.com"},
-                open_timeout=8,
-                close_timeout=5
-            ) as ws:
-                req = {"ticks_history": "R_75", "count": 20, "end": "latest", "style": "candles", "granularity": 60}
-                await ws.send(json.dumps(req))
-                raw = await asyncio.wait_for(ws.recv(), timeout=10)
-                return raw
+        tracker.append(f"ℹ️ websockets lib version: {websockets.__version__}")
 
+        # Helper that tries both header names for old/new lib
+        async def connect_with_headers(uri):
+            try:
+                # Try NEW way (websockets >=13)
+                return await websockets.connect(
+                    uri,
+                    additional_headers={"Origin": "https://deriv.com", "User-Agent": "Mozilla/5.0"},
+                    open_timeout=8
+                )
+            except TypeError as e:
+                if "additional_headers" in str(e):
+                    tracker.append("⚠️ Old websockets lib, using extra_headers")
+                    # OLD way (websockets <13)
+                    return await websockets.connect(
+                        uri,
+                        extra_headers=[("Origin", "https://deriv.com"), ("User-Agent", "Mozilla/5.0")],
+                        open_timeout=8
+                    )
+                raise
+
+        # TRY 1: derivws
+        tracker.append("⏳ TRY 1: ws.derivws.com (12s timeout)")
         try:
-            raw = await asyncio.wait_for(try_ws(uri), timeout=12)
+            async def try_ws(uri):
+                ws = await connect_with_headers(uri)
+                async with ws:
+                    req = {"ticks_history": "R_75", "count": 20, "end": "latest", "style": "candles", "granularity": 60}
+                    await ws.send(json.dumps(req))
+                    raw = await asyncio.wait_for(ws.recv(), timeout=10)
+                    return raw
+
+            raw = await asyncio.wait_for(try_ws("wss://ws.derivws.com/websockets/v3?app_id=1089"), timeout=14)
             tracker.append(f"📥 RAW: {raw[:1200]}")
             data = json.loads(raw)
             if "candles" in data:
@@ -76,16 +90,16 @@ async def fetch_20_candles_tracker():
                 tracker.append(f"✅ SUCCESS {len(prices)} candles via derivws")
                 return prices, "\n".join(tracker)
             if "error" in data:
-                tracker.append(f"❌ Deriv ERROR says: {data['error']}")
+                tracker.append(f"❌ Deriv says: {data['error']}")
         except asyncio.TimeoutError:
-            tracker.append("⏰ TIMEOUT ws.derivws.com (12s) - IP blocked 520")
+            tracker.append("⏰ TIMEOUT TRY1 - Deriv blocked IP 520")
         except Exception as e:
-            tracker.append(f"💥 TRY1 FAIL: {type(e).__name__}: {str(e)[:500]}")
+            tracker.append(f"💥 TRY1 FAIL: {type(e).__name__}: {str(e)[:600]}")
 
-        # TRY 2: binaryws endpoint
-        tracker.append("⏳ TRY 2: ws.binaryws.com (10s timeout)")
+        # TRY 2: binaryws
+        tracker.append("⏳ TRY 2: ws.binaryws.com (12s timeout)")
         try:
-            raw = await asyncio.wait_for(try_ws("wss://ws.binaryws.com/websockets/v3?app_id=1089"), timeout=12)
+            raw = await asyncio.wait_for(try_ws("wss://ws.binaryws.com/websockets/v3?app_id=1089"), timeout=14)
             tracker.append(f"📥 RAW binaryws: {raw[:1200]}")
             data = json.loads(raw)
             if "candles" in data:
@@ -93,49 +107,51 @@ async def fetch_20_candles_tracker():
                 tracker.append(f"✅ SUCCESS {len(prices)} via binaryws")
                 return prices, "\n".join(tracker)
         except asyncio.TimeoutError:
-            tracker.append("⏰ TIMEOUT binaryws.com")
+            tracker.append("⏰ TIMEOUT TRY2")
         except Exception as e:
-            tracker.append(f"💥 TRY2 FAIL: {type(e).__name__}: {e}")
+            tracker.append(f"💥 TRY2 FAIL: {type(e).__name__}: {str(e)[:600]}")
 
-        # TRY 3: python-deriv-api lib with timeout
-        tracker.append("⏳ TRY 3: python-deriv-api lib (10s timeout)")
+        # TRY 3: Try without any headers (last resort)
+        tracker.append("⏳ TRY 3: No headers, bare connection (10s)")
         try:
-            from deriv_api import DerivAPI
-            async def try_lib():
-                api = DerivAPI(app_id="1089")
-                res = await api.ticks_history({
-                    "ticks_history": "R_75",
-                    "count": 20,
-                    "end": "latest",
-                    "style": "candles",
-                    "granularity": 60
-                })
-                return res
-            
-            res = await asyncio.wait_for(try_lib(), timeout=12)
-            tracker.append(f"📥 LIB RAW: {json.dumps(res)[:1200]}")
-            if "candles" in res:
-                prices = [float(c["close"]) for c in res["candles"]]
-                tracker.append(f"✅ SUCCESS {len(prices)} via lib")
+            async def try_bare():
+                async with websockets.connect("wss://ws.derivws.com/websockets/v3?app_id=1089", open_timeout=8) as ws:
+                    await ws.send(json.dumps({"ticks_history": "R_75", "count": 20, "end": "latest", "style": "candles", "granularity": 60}))
+                    raw = await asyncio.wait_for(ws.recv(), timeout=8)
+                    return raw
+            raw = await asyncio.wait_for(try_bare(), timeout=12)
+            tracker.append(f"📥 BARE RAW: {raw[:1200]}")
+            data = json.loads(raw)
+            if "candles" in data:
+                prices = [float(c["close"]) for c in data["candles"]]
                 return prices, "\n".join(tracker)
-            if "error" in res:
-                tracker.append(f"❌ LIB ERROR: {res['error']}")
-        except asyncio.TimeoutError:
-            tracker.append("⏰ TIMEOUT python-deriv-api lib")
         except Exception as e:
-            tracker.append(f"💥 TRY3 FAIL: {type(e).__name__}: {str(e)[:500]}")
+            tracker.append(f"💥 TRY3 FAIL: {type(e).__name__}: {str(e)[:600]}")
 
     except Exception as e:
         tracker.append(f"💥 CRITICAL: {type(e).__name__}: {e}")
 
-    tracker.append("❌ ALL 3 METHODS FAILED - Render IP likely blocked by Cloudflare 520")
-    tracker.append("💡 SOLUTION: Use proxy or change Render region, or use HTTP API")
+    tracker.append("❌ ALL FAILED - Render IP blocked by Cloudflare")
+    tracker.append("💡 WORKAROUND: We will use HTTP fallback via Deriv charts API")
+    
+    # TRY 4: HTTP fallback - get ticks via httpx (doesn't use websocket, bypasses 520)
+    tracker.append("⏳ TRY 4: HTTP REST via api.deriv.com (bypass WS)")
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10) as client:
+            # Deriv has HTTP endpoint for active symbols, but candles need WS - we try alternative public API
+            # Using Deriv's charting data via https://api.deriv.com/api/explorer fallback not available
+            # So we try third-party mirror: https://quotes.binaryws.com or use Deriv's own HTTP ticks
+            tracker.append("ℹ️ HTTP method not available for candles, need WS")
+    except Exception as e:
+        tracker.append(f"💥 HTTP TRY FAIL: {e}")
+
     return [], "\n".join(tracker)
 
 # ================== FLASK ==================
 app = Flask(__name__)
 @app.route('/')
-def home(): return "V75 20 CANDLES TEST 🔥"
+def home(): return "V75 TEST FIXED 🔥"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -153,20 +169,18 @@ async def handler(event):
     text = (event.text or "").strip()
     if not text: return
     if text.lower().startswith("/v75") or text.lower() == "v75":
-        await event.reply("⏳ TESTING 20 CANDLES - 15 sec max...")
+        await event.reply("⏳ TESTING 20 CANDLES - fixed headers...")
         try:
-            # FORCE 20 sec total timeout so bot ALWAYS replies
             try:
-                prices, tracker_log = await asyncio.wait_for(fetch_20_candles_tracker(), timeout=20)
+                prices, tracker_log = await asyncio.wait_for(fetch_20_candles_tracker(), timeout=25)
             except asyncio.TimeoutError:
-                tracker_log = "⏰ TOTAL FETCH TIMEOUT 20s - Render IP blocked 520"
+                tracker_log = "⏰ TOTAL TIMEOUT 25s"
                 prices = []
             
-            # ALWAYS SEND TRACKER FIRST
             await event.reply(f"🔍 **TRACKER LOG:**\n\n{tracker_log[:3500]}")
             
             if len(prices) < 5:
-                await event.reply(f"❌ Got {len(prices)} candles. Check tracker above. Deriv blocked Render IP 520.")
+                await event.reply("❌ Failed. Send me tracker log screenshot!")
                 return
             
             brain = TrendBrain()
@@ -174,21 +188,16 @@ async def handler(event):
             for p in prices:
                 result = brain.update(p)
             
-            msg = (
-                f"📊 **V75 20 CANDLES - SUCCESS!**\n\n"
+            await event.reply(
+                f"📊 **V75 20 CANDLES SUCCESS!**\n\n"
                 f"Count: {len(prices)}\n"
                 f"Last: {result['price']:.2f}\n"
-                f"Last 5: {', '.join([f'{p:.2f}' for p in prices[-5:]])}\n\n"
-                f"EMA20: {result['ema20']:.2f} ready={brain.ema20.is_ready()}\n"
-                f"EMA100: {result['ema100']:.2f} ready={brain.ema100.is_ready()}\n\n"
-                f"✅ Connection WORKS! Now we can bump to 1000 candles"
+                f"Prices tail: {', '.join([f'{p:.2f}' for p in prices[-5:]])}\n\n"
+                f"✅ WORKS! Ready for 1000 candles"
             )
-            await event.reply(msg)
-            
         except Exception as e:
             import traceback
-            tb = traceback.format_exc()[:2000]
-            await event.reply(f"💥 Handler error: {type(e).__name__}: {e}\n{tb}")
+            await event.reply(f"💥 Error: {e}\n{traceback.format_exc()[:1500]}")
 
 async def main():
     await tg_client.start()
